@@ -23,6 +23,8 @@ A new OP which tries to convey changes of Content Process surfaces to the parent
 
 c) Rest of code which patches various aspects of Layer Manager
 
+d) dummy sockets for chromium-ipc
+
 How to run
 ----------
 
@@ -40,6 +42,8 @@ e) then run client fennec:
   $ MOZ_LAYERS_FORCE_NETWORK_SURFACES=1 ./run-mozilla.sh ./fennec
   this will start local fennec and make it connect to localhost:12345. You might want to change localhost to 
   your real server address or do some tunnelling
+  
+f) try loading some pages and scroll. It should work
 
 Notes
 -----
@@ -48,3 +52,5 @@ Notes
     browser.ui.zoom.pageFitGranularity to 1 otherwise you probably will be getting tons of useless repaints
   * the code does some work of filtering out 'bogus' repaints by calculating crc32 on repainted areas. This is 
     unreliable, disable it
+  * Lossful JPEG compression is used for pixel data. The quality ratio is rather ungodly, you might want to tune it
+    too.
