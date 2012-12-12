@@ -1,0 +1,974 @@
+# HG changeset patch
+# Parent b25c3bbf8bd62d7e0b9c8163dfbdfcc27066e919
+
+diff -r b25c3bbf8bd6 gfx/layers/ThebesLayerBuffer.cpp
+--- a/gfx/layers/ThebesLayerBuffer.cpp	Mon Jul 16 10:05:22 2012 -0700
++++ b/gfx/layers/ThebesLayerBuffer.cpp	Mon Jul 16 16:25:48 2012 -0700
+@@ -247,6 +247,7 @@
+       // No pixels are going to be kept. The whole visible region
+       // will be redrawn, so we don't need to copy anything, so we don't
+       // set destBuffer.
++      MOZ_LAYERS_LOG(("NO pixels are reusable!"));
+       mBufferRect = destBufferRect;
+       mBufferRotation = nsIntPoint(0,0);
+     }
+diff -r b25c3bbf8bd6 gfx/layers/basic/BasicLayers.cpp
+--- a/gfx/layers/basic/BasicLayers.cpp	Mon Jul 16 10:05:22 2012 -0700
++++ b/gfx/layers/basic/BasicLayers.cpp	Mon Jul 16 16:25:48 2012 -0700
+@@ -61,6 +61,12 @@
+ 
+ #include "GLContext.h"
+ 
++#include "imgIEncoder.h"
++#include "prmem.h"
++#include "plbase64.h"
++#include "gfxSharedImageSurface.h"
++
++
+ namespace mozilla {
+ namespace layers {
+ 
+@@ -89,6 +95,100 @@
+  *       |                                  |
+  *       +-> BasicImageLayer <--------------+
+  */
++
++
++static uint32_t crc32_tab[] = {
++	0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f,
++	0xe963a535, 0x9e6495a3,	0x0edb8832, 0x79dcb8a4, 0xe0d5e91e, 0x97d2d988,
++	0x09b64c2b, 0x7eb17cbd, 0xe7b82d07, 0x90bf1d91, 0x1db71064, 0x6ab020f2,
++	0xf3b97148, 0x84be41de,	0x1adad47d, 0x6ddde4eb, 0xf4d4b551, 0x83d385c7,
++	0x136c9856, 0x646ba8c0, 0xfd62f97a, 0x8a65c9ec,	0x14015c4f, 0x63066cd9,
++	0xfa0f3d63, 0x8d080df5,	0x3b6e20c8, 0x4c69105e, 0xd56041e4, 0xa2677172,
++	0x3c03e4d1, 0x4b04d447, 0xd20d85fd, 0xa50ab56b,	0x35b5a8fa, 0x42b2986c,
++	0xdbbbc9d6, 0xacbcf940,	0x32d86ce3, 0x45df5c75, 0xdcd60dcf, 0xabd13d59,
++	0x26d930ac, 0x51de003a, 0xc8d75180, 0xbfd06116, 0x21b4f4b5, 0x56b3c423,
++	0xcfba9599, 0xb8bda50f, 0x2802b89e, 0x5f058808, 0xc60cd9b2, 0xb10be924,
++	0x2f6f7c87, 0x58684c11, 0xc1611dab, 0xb6662d3d,	0x76dc4190, 0x01db7106,
++	0x98d220bc, 0xefd5102a, 0x71b18589, 0x06b6b51f, 0x9fbfe4a5, 0xe8b8d433,
++	0x7807c9a2, 0x0f00f934, 0x9609a88e, 0xe10e9818, 0x7f6a0dbb, 0x086d3d2d,
++	0x91646c97, 0xe6635c01, 0x6b6b51f4, 0x1c6c6162, 0x856530d8, 0xf262004e,
++	0x6c0695ed, 0x1b01a57b, 0x8208f4c1, 0xf50fc457, 0x65b0d9c6, 0x12b7e950,
++	0x8bbeb8ea, 0xfcb9887c, 0x62dd1ddf, 0x15da2d49, 0x8cd37cf3, 0xfbd44c65,
++	0x4db26158, 0x3ab551ce, 0xa3bc0074, 0xd4bb30e2, 0x4adfa541, 0x3dd895d7,
++	0xa4d1c46d, 0xd3d6f4fb, 0x4369e96a, 0x346ed9fc, 0xad678846, 0xda60b8d0,
++	0x44042d73, 0x33031de5, 0xaa0a4c5f, 0xdd0d7cc9, 0x5005713c, 0x270241aa,
++	0xbe0b1010, 0xc90c2086, 0x5768b525, 0x206f85b3, 0xb966d409, 0xce61e49f,
++	0x5edef90e, 0x29d9c998, 0xb0d09822, 0xc7d7a8b4, 0x59b33d17, 0x2eb40d81,
++	0xb7bd5c3b, 0xc0ba6cad, 0xedb88320, 0x9abfb3b6, 0x03b6e20c, 0x74b1d29a,
++	0xead54739, 0x9dd277af, 0x04db2615, 0x73dc1683, 0xe3630b12, 0x94643b84,
++	0x0d6d6a3e, 0x7a6a5aa8, 0xe40ecf0b, 0x9309ff9d, 0x0a00ae27, 0x7d079eb1,
++	0xf00f9344, 0x8708a3d2, 0x1e01f268, 0x6906c2fe, 0xf762575d, 0x806567cb,
++	0x196c3671, 0x6e6b06e7, 0xfed41b76, 0x89d32be0, 0x10da7a5a, 0x67dd4acc,
++	0xf9b9df6f, 0x8ebeeff9, 0x17b7be43, 0x60b08ed5, 0xd6d6a3e8, 0xa1d1937e,
++	0x38d8c2c4, 0x4fdff252, 0xd1bb67f1, 0xa6bc5767, 0x3fb506dd, 0x48b2364b,
++	0xd80d2bda, 0xaf0a1b4c, 0x36034af6, 0x41047a60, 0xdf60efc3, 0xa867df55,
++	0x316e8eef, 0x4669be79, 0xcb61b38c, 0xbc66831a, 0x256fd2a0, 0x5268e236,
++	0xcc0c7795, 0xbb0b4703, 0x220216b9, 0x5505262f, 0xc5ba3bbe, 0xb2bd0b28,
++	0x2bb45a92, 0x5cb36a04, 0xc2d7ffa7, 0xb5d0cf31, 0x2cd99e8b, 0x5bdeae1d,
++	0x9b64c2b0, 0xec63f226, 0x756aa39c, 0x026d930a, 0x9c0906a9, 0xeb0e363f,
++	0x72076785, 0x05005713, 0x95bf4a82, 0xe2b87a14, 0x7bb12bae, 0x0cb61b38,
++	0x92d28e9b, 0xe5d5be0d, 0x7cdcefb7, 0x0bdbdf21, 0x86d3d2d4, 0xf1d4e242,
++	0x68ddb3f8, 0x1fda836e, 0x81be16cd, 0xf6b9265b, 0x6fb077e1, 0x18b74777,
++	0x88085ae6, 0xff0f6a70, 0x66063bca, 0x11010b5c, 0x8f659eff, 0xf862ae69,
++	0x616bffd3, 0x166ccf45, 0xa00ae278, 0xd70dd2ee, 0x4e048354, 0x3903b3c2,
++	0xa7672661, 0xd06016f7, 0x4969474d, 0x3e6e77db, 0xaed16a4a, 0xd9d65adc,
++	0x40df0b66, 0x37d83bf0, 0xa9bcae53, 0xdebb9ec5, 0x47b2cf7f, 0x30b5ffe9,
++	0xbdbdf21c, 0xcabac28a, 0x53b39330, 0x24b4a3a6, 0xbad03605, 0xcdd70693,
++	0x54de5729, 0x23d967bf, 0xb3667a2e, 0xc4614ab8, 0x5d681b02, 0x2a6f2b94,
++	0xb40bbe37, 0xc30c8ea1, 0x5a05df1b, 0x2d02ef8d
++};
++
++uint32_t
++crc32(uint32_t crc, const uint8_t *buf, size_t size)
++{
++	const uint8_t *p;
++
++	p = (uint8_t*) buf;
++	crc = crc ^ ~0U;
++
++	while (size--)
++		crc = crc32_tab[(crc ^ *p++) & 0xFF] ^ (crc >> 8);
++
++	return crc ^ ~0U;
++}
++
++uint32_t crc32_surface(uint8_t *data, uint32_t stride, uint32 width, uint32 height)
++{
++
++	uint32_t crc = 0;
++	int i = 0;
++
++	while (height--) {
++		crc = crc32(crc, data, width);
++		data += stride;
++	}
++
++	return crc;
++}
++
++uint32_t crc32_surface_rect(gfxImageSurface *surf,  const nsIntRect *rect)
++{
++
++	uint32_t crc = 0;
++	int i = 0;
++	uint32_t height = rect->height;
++
++	const uint8_t *data = (uint8_t *) surf->Data() + rect->y * surf->Stride() + (rect->x * 4);
++
++	while (height--) {
++		crc = crc32(crc, data , rect->width);
++		data += surf->Stride();
++	}
++
++	return crc;
++}
++
++
+ class BasicImplData {
+ public:
+   BasicImplData()
+@@ -1462,6 +1562,64 @@
+   SurfaceDescriptor mNewFrontBuffer;
+   nsIntSize mBufferSize;
+ };
++
++void PNGEncodeBuffer (gfxImageSurface *surf,  nsIntRect *rect, char **buffer, unsigned long *size) {
++
++
++  nsCOMPtr<imgIEncoder> encoder =
++  do_CreateInstance("@mozilla.org/image/encoder;2?type=image/jpeg");
++
++  nsresult rv = encoder->InitFromData(surf->Data() + rect->y * surf->Stride() + (rect->x * 4),
++                                      0,
++                                      rect->width,
++                                      rect->height,
++                                      surf->Stride(),
++                                      imgIEncoder::INPUT_FORMAT_HOSTARGB,
++                                      NS_LITERAL_STRING("quality=30"));
++  if (NS_FAILED(rv))
++    return;
++
++  nsCOMPtr<nsIInputStream> imgStream;
++  CallQueryInterface(encoder.get(), getter_AddRefs(imgStream));
++  if (!imgStream)
++    return;
++
++  PRUint32 bufSize;
++  rv = imgStream->Available(&bufSize);
++  if (NS_FAILED(rv))
++    return;
++
++  // ...leave a little extra room so we can call read again and make sure we
++  // got everything. 16 bytes for better padding (maybe)
++  bufSize += 16;
++  PRUint32 imgSize = 0;
++  char* imgData = (char*)PR_Malloc(bufSize);
++  if (!imgData)
++    return;
++  PRUint32 numReadThisTime = 0;
++  while ((rv = imgStream->Read(&imgData[imgSize],
++                               bufSize - imgSize,
++                               &numReadThisTime)) == NS_OK && numReadThisTime > 0)
++  {
++    imgSize += numReadThisTime;
++    if (imgSize == bufSize) {
++      // need a bigger buffer, just double
++      bufSize *= 2;
++      char* newImgData = (char*)PR_Realloc(imgData, bufSize);
++      if (!newImgData) {
++        PR_Free(imgData);
++        return;
++      }
++      imgData = newImgData;
++    }
++  }
++
++  *buffer = imgData;
++  *size = imgSize;
++  return;
++
++}
++
+  
+ void
+ BasicShadowableThebesLayer::PaintBuffer(gfxContext* aContext,
+@@ -1470,9 +1628,48 @@
+                                         LayerManager::DrawThebesLayerCallback aCallback,
+                                         void* aCallbackData)
+ {
++  nsTArray<uint32_t> sums(50);
++  nsIntRegion trimmed_region;
++
++  if (XRE_GetProcessType() == GeckoProcessType_Content)
++  {
++      nsRefPtr<gfxASurface> surf = getter_AddRefs(aContext->CurrentSurface());
++      nsRefPtr<gfxImageSurface> imgsurf = static_cast<gfxImageSurface*>(surf.get());
++      int i = 0;
++
++      nsIntRegionRectIterator *iter = new nsIntRegionRectIterator(aRegionToDraw);
++      const nsIntRect *cur = NULL;
++      for (cur = iter->Next(); cur; cur=iter->Next()) {
++         MOZ_LAYERS_LOG(("drew region: %4d %4d %4d %4d \n", cur->x, cur->y, cur->width, cur->height));
++         nsIntRect tmprect(cur->x + (int) aContext->CurrentMatrix().x0, cur->y + (int) aContext->CurrentMatrix().y0, cur->width, cur->height);
++         uint32_t crc = crc32_surface_rect(imgsurf, &tmprect);
++         sums.AppendElement(crc);
++      }
++  }
++
+   Base::PaintBuffer(aContext, aRegionToDraw, aRegionToInvalidate,
+                     aCallback, aCallbackData);
+ 
++  if (XRE_GetProcessType() == GeckoProcessType_Content)
++  {
++      nsRefPtr<gfxASurface> surf = getter_AddRefs(aContext->CurrentSurface());
++      nsRefPtr<gfxImageSurface> imgsurf = static_cast<gfxImageSurface*>(surf.get());
++      int i = 0;
++
++      nsIntRegionRectIterator iter(aRegionToDraw);
++
++      while (const nsIntRect* cur = iter.Next()) {
++          nsIntRect tmprect(cur->x + (int) aContext->CurrentMatrix().x0, cur->y + (int) aContext->CurrentMatrix().y0, cur->width, cur->height);
++          uint32_t crc = crc32_surface_rect(imgsurf, &tmprect);
++          if (crc == sums[i]) {
++          } else {
++              trimmed_region.Or(trimmed_region, *cur);
++          }
++          i++;
++      }
++  }
++
++
+   if (HasShadow()) {
+     NS_ABORT_IF_FALSE(IsSurfaceDescriptorValid(mBackBuffer),
+                       "should have a back buffer by now");
+@@ -1508,6 +1705,84 @@
+       updatedRegion.SetEmpty();
+     }
+ 
++
++
++  if (PR_GetEnv("MOZ_LAYERS_FORCE_NETWORK_SURFACES")) {
++
++//      const nsIntRegion &workingReg = trimmed_region;
++
++      const nsIntRegion &workingReg = aRegionToDraw;
++      
++      nsIntPoint rotation = mBuffer.BufferRotation();
++      nsIntRect bufferrect = mBuffer.BufferRect();
++
++      static int update = 0;
++
++      nsRefPtr<gfxASurface> surf = getter_AddRefs(aContext->CurrentSurface());
++      nsRefPtr<gfxImageSurface> imgsurf = static_cast<gfxImageSurface*>(surf.get());
++
++      unsigned int numregions = workingReg.GetNumRects();
++
++      nsTArray<PRUint32> sizes;
++      nsTArray<uint8> data;
++
++      nsIntRegionRectIterator *iter = new nsIntRegionRectIterator(workingReg);
++      const nsIntRect *cur = NULL;
++
++      int serial = 0;
++      for (cur = iter->Next(); cur; cur=iter->Next()) {
++
++          MOZ_LAYERS_LOG(("[%d %d] saving region: %d %d %d %d\n", update, serial, cur->x, cur->y, cur->width, cur->height));
++          MOZ_LAYERS_LOG(("[%d %d] matrix translation: %f ", update, serial, aContext->CurrentMatrix().y0));
++
++          char *__buf = NULL;
++          unsigned long __size = 0;
++
++          nsIntRect tmprect(cur->x + (int) aContext->CurrentMatrix().x0, cur->y + (int) aContext->CurrentMatrix().y0, cur->width, cur->height);
++
++            PNGEncodeBuffer(imgsurf, &tmprect, &__buf, &__size);
++
++#ifdef MOZ_DUMP_PAINTING
++          if (PR_GetEnv("MOZ_LAYERS_DUMP_NETWORK_SURFACES")) {
++              char buff[128];
++              snprintf(buff,128,"/tmp/to-be-sent-surface-%04d-%04d.jpg", update, serial);
++              FILE *f = fopen(buff, "wb");
++              fwrite(__buf, __size, 1, f);
++              fclose(f);
++              snprintf(buff,128,"/tmp/shm-surface-%04d-%04d.png", update, serial);
++              imgsurf->WriteAsPNG(buff);
++          }
++#endif
++          sizes.AppendElement(__size);
++          data.AppendElements(__buf, __size);
++
++          PR_Free(__buf);
++          serial++;
++      }
++
++
++
++      unsigned long total = 0;
++      for (int i = 0; i<numregions; i++) {
++          total += sizes[i];
++      }
++      MOZ_LAYERS_LOG(("[%d] about to send %d over the network", update, total));
++//      printf("about to send %6d k over the network, new buffer=%d, didselfcopy=%d, bufferRect=%d %d %d %d, rot= %d %d\n", total / 1024, mIsNewBuffer, aDidSelfCopy, mBuffer.BufferRect().x,mBuffer.BufferRect().y, mBuffer.BufferRect().width, mBuffer.BufferRect().height, mBuffer.BufferRotation().x, mBuffer.BufferRotation().y );
++
++      BasicManager()->PaintedThebesBufferNet(BasicManager()->Hold(this),
++                                             workingReg,
++                                             mBuffer.BufferRect(),
++                                             mBuffer.BufferRotation(),
++                                             mBackBuffer, numregions, sizes, data, /*aDidSelfCopy*/ PR_FALSE);
++      update++;
++
++      return;
++
++
++  }
++
++
++
+     BasicManager()->PaintedThebesBuffer(BasicManager()->Hold(this),
+                                         updatedRegion,
+                                         mBuffer.BufferRect(),
+@@ -1947,6 +2222,9 @@
+     getter_AddRefs(unused), &aNewBack->rect(), &aNewBack->rotation());
+ 
+   mFrontBufferDescriptor = aNewFront.buffer();
++
++  _currentFrontSurface = mFrontBuffer.GetBuffer();
++
+ }
+ 
+ void
+@@ -2325,6 +2603,7 @@
+   MOZ_COUNT_DTOR(BasicShadowLayerManager);
+ }
+ 
++
+ void
+ BasicShadowLayerManager::SetRoot(Layer* aLayer)
+ {
+diff -r b25c3bbf8bd6 gfx/layers/ipc/PLayers.ipdl
+--- a/gfx/layers/ipc/PLayers.ipdl	Mon Jul 16 10:05:22 2012 -0700
++++ b/gfx/layers/ipc/PLayers.ipdl	Mon Jul 16 16:25:48 2012 -0700
+@@ -54,6 +54,9 @@
+ using mozilla::layers::FrameMetrics;
+ using mozilla::layers::SurfaceDescriptorX11;
+ using mozilla::null_t;
++using gfxIntSize;
++using gfxImageFormat;
++
+ 
+ /**
+  * The layers protocol is spoken between thread contexts that manage
+@@ -77,11 +80,21 @@
+ // buffer that only contains (transparent) black pixels just so that
+ // we can swap it back after the first OpPaint without a special case.
+ 
++struct SurfaceDescriptorNetworked {
++    gfxIntSize size;
++    uint32_t id;
++};
++
++
+ union SurfaceDescriptor {
+   Shmem;
+   SurfaceDescriptorX11;
++  SurfaceDescriptorNetworked;
+ };
+ 
++
++
++
+ struct ThebesBuffer {
+   SurfaceDescriptor buffer;
+   nsIntRect rect;
+@@ -166,6 +179,17 @@
+   nsIntRegion updatedRegion;
+ };
+ 
++struct OpPaintThebesBufferNet {
++  PLayer layer;
++  ThebesBuffer newFrontBuffer;
++  nsIntRegion updatedRegion;
++  uint32_t numregions;
++  uint32_t[] sizes;
++  uint8_t[] data;
++  bool didSelfCopy;
++};	
++
++
+ struct OpPaintCanvas  {
+   PLayer layer;
+   nsIntRect updated;
+@@ -178,6 +202,10 @@
+ };
+ 
+ 
++struct OpDestroySurface  {
++  SurfaceDescriptor surface;
++};
++
+ // A unit of a changeset; a set of these comprise a changeset
+ union Edit {
+   OpCreateThebesLayer;
+@@ -192,6 +220,8 @@
+   OpDestroyCanvasFrontBuffer;
+   OpDestroyImageFrontBuffer;
+ 
++  OpDestroySurface;
++
+   OpSetLayerAttributes;
+ 
+   OpSetRoot;
+@@ -200,6 +230,7 @@
+   OpRemoveChild;
+ 
+   OpPaintThebesBuffer;
++  OpPaintThebesBufferNet;
+   OpPaintCanvas;
+   OpPaintImage;
+ };
+diff -r b25c3bbf8bd6 gfx/layers/ipc/ShadowLayers.cpp
+--- a/gfx/layers/ipc/ShadowLayers.cpp	Mon Jul 16 10:05:22 2012 -0700
++++ b/gfx/layers/ipc/ShadowLayers.cpp	Mon Jul 16 16:25:48 2012 -0700
+@@ -50,6 +50,15 @@
+ #include "ShadowLayers.h"
+ #include "ShadowLayerChild.h"
+ 
++#include "gfxASurface.h"
++#include "nsTHashtable.h"
++#include "nsHashKeys.h"
++#include "nsClassHashtable.h"
++#include "nsRefPtrHashtable.h"
++#include "nsDataHashtable.h"
++#include "nsXULAppAPI.h"
++
++
+ using namespace mozilla::ipc;
+ 
+ namespace mozilla {
+@@ -59,6 +68,8 @@
+ typedef std::vector<Edit> EditVector;
+ typedef std::set<ShadowableLayer*> ShadowableLayerSet;
+ 
++nsRefPtrHashtable<nsUint32HashKey, gfxASurface> myhash;
++
+ class Transaction
+ {
+ public:
+@@ -89,6 +100,7 @@
+   {
+     NS_ABORT_IF_FALSE(!Finished(), "forgot BeginTransaction?");
+     mDyingBuffers.AppendElement(aBuffer);
++    MOZ_LAYERS_LOG(("adding transaction to destro a buffer!"));
+   }
+ 
+   void End()
+@@ -281,8 +293,37 @@
+                                      ThebesBuffer(aNewFrontBuffer,
+                                                   aBufferRect,
+                                                   aBufferRotation),
+-                                     aUpdatedRegion));
++                                     aUpdatedRegion)
++                                     );
++
+ }
++
++void
++ShadowLayerForwarder::PaintedThebesBufferNet(ShadowableLayer* aThebes,
++                                          const nsIntRegion& aUpdatedRegion,
++                                          const nsIntRect& aBufferRect,
++                                          const nsIntPoint& aBufferRotation,
++                                          const SurfaceDescriptor& aNewFrontBuffer,
++                                          unsigned int num, nsTArray<PRUint32> sizes, nsTArray<uint8> data, bool aDidSelfCopy)
++{
++
++  MOZ_LAYERS_LOG(("--------> sending Painted, setting new buffer %x", &aNewFrontBuffer));
++
++  mTxn->AddPaint(OpPaintThebesBufferNet(NULL, Shadow(aThebes),
++                                                      ThebesBuffer(aNewFrontBuffer,
++                                                                   aBufferRect,
++                                                                   aBufferRotation),
++                                                      aUpdatedRegion, 
++                                                      num, 
++                                                      (const nsTArray<PRUint32>) sizes, 
++                                                      (const nsTArray<uint8> ) data, 
++                                                      aDidSelfCopy
++                                       )
++
++                                     );
++}
++
++
+ void
+ ShadowLayerForwarder::PaintedImage(ShadowableLayer* aImage,
+                                    gfxSharedImageSurface* aNewFrontSurface)
+@@ -312,12 +353,6 @@
+     return PR_TRUE;
+   }
+ 
+-  MOZ_LAYERS_LOG(("[LayersForwarder] destroying buffers..."));
+-
+-  for (PRUint32 i = 0; i < mTxn->mDyingBuffers.Length(); ++i) {
+-    DestroySharedSurface(&mTxn->mDyingBuffers[i]);
+-  }
+-
+   MOZ_LAYERS_LOG(("[LayersForwarder] building transaction..."));
+ 
+   // We purposely add attribute-change ops to the final changeset
+@@ -349,6 +384,16 @@
+   size_t nCsets = mTxn->mCset.size() + mTxn->mPaints.size();
+   NS_ABORT_IF_FALSE(nCsets > 0, "should have bailed by now");
+ 
++  MOZ_LAYERS_LOG(("[LayersForwarder] destroying buffers..."));
++  for (PRUint32 i = 0; i < mTxn->mDyingBuffers.Length(); ++i) {
++    // only networking surfaces are to be destroyed on the parent
++    if (mTxn->mDyingBuffers[i].type() == SurfaceDescriptor::TSurfaceDescriptorNetworked) {
++        cset.AppendElement(OpDestroySurface(mTxn->mDyingBuffers[i]));
++    }
++
++    DestroySharedSurface(&mTxn->mDyingBuffers[i]);
++  }
++
+   cset.SetCapacity(nCsets);
+   if (!mTxn->mCset.empty()) {
+     cset.AppendElements(&mTxn->mCset.front(), mTxn->mCset.size());
+@@ -378,7 +423,8 @@
+   switch (aContent) {
+   case gfxASurface::CONTENT_COLOR:
+ #ifdef MOZ_GFX_OPTIMIZE_MOBILE
+-    return gfxASurface::ImageFormatRGB16_565;
++    // uhm, yeah
++    return gfxASurface::ImageFormatRGB24;
+ #else
+     return gfxASurface::ImageFormatRGB24;
+ #endif
+@@ -441,6 +487,20 @@
+                                         SurfaceDescriptor* aFrontBuffer,
+                                         SurfaceDescriptor* aBackBuffer)
+ {
++
++  if (PR_GetEnv("MOZ_LAYERS_FORCE_NETWORK_SURFACES")) {
++     static unsigned long id = 0;
++
++     *aFrontBuffer = SurfaceDescriptorNetworked(aSize, id);
++     MOZ_LAYERS_LOG(("> created new surface %x, id=%d", aFrontBuffer, id));
++     id++;
++
++     *aBackBuffer = SurfaceDescriptorNetworked(aSize, id);
++     MOZ_LAYERS_LOG(("> created new surface %x, id=%d", aBackBuffer, id));
++     id++;
++
++  } else {
++  
+   PRBool tryPlatformSurface = PR_TRUE;
+ #ifdef DEBUG
+   tryPlatformSurface = !PR_GetEnv("MOZ_LAYERS_FORCE_SHMEM_SURFACES");
+@@ -459,28 +519,77 @@
+ 
+   *aFrontBuffer = front->GetShmem();
+   *aBackBuffer = back->GetShmem();
++
++  }
++
+   return PR_TRUE;
++  
+ }
+ 
+ /*static*/ already_AddRefed<gfxASurface>
+ ShadowLayerForwarder::OpenDescriptor(const SurfaceDescriptor& aSurface)
+ {
++
++  if (!myhash.IsInitialized())
++    myhash.Init(128);
++
+   nsRefPtr<gfxASurface> surf = PlatformOpenDescriptor(aSurface);
+   if (surf) {
+     return surf.forget();
+   }
+-
++  
+   switch (aSurface.type()) {
+   case SurfaceDescriptor::TShmem: {
+     surf = new gfxSharedImageSurface(aSurface.get_Shmem());
+     return surf.forget();
+   }
++  case SurfaceDescriptor::TSurfaceDescriptorNetworked: {
++
++    gfxASurface *ptr = NULL;
++    uint32 id = aSurface.get_SurfaceDescriptorNetworked().id();
++
++    if (!myhash.Get(id, &ptr)) {
++        surf = new gfxImageSurface(aSurface.get_SurfaceDescriptorNetworked().size(), gfxASurface::ImageFormatRGB24);
++        MOZ_LAYERS_LOG(("ShadowLayerForwarder::OpenDescriptor !!! creating new buffer!! %x [%d %d], surface %x for id %d", surf.get(), surf->GetSize().width, surf->GetSize().height, (void*)&aSurface, id));
++        myhash.Put(id, surf);
++        return surf.forget();
++    } else {
++        MOZ_LAYERS_LOG(("ShadowLayerForwarder::OpenDescriptor !!! buffer %x already existed for id %d", ptr, id));
++        return ptr;
++    }
++
++  }
+   default:
+     NS_RUNTIMEABORT("unexpected SurfaceDescriptor type!");
+     return nsnull;
+   }
+ }
+ 
++static void
++DestroyNetworkSurface(SurfaceDescriptor* aSurface)
++{
++  switch (aSurface->type()) {
++  case SurfaceDescriptor::TSurfaceDescriptorNetworked: {
++      gfxASurface *ptr = NULL;
++      uint32 id = aSurface->get_SurfaceDescriptorNetworked().id();
++      if (myhash.Get(id, &ptr)) {
++          myhash.Remove(id);
++          MOZ_LAYERS_LOG(("REMOVED buffer id = %d", id));
++          *aSurface = SurfaceDescriptor();
++          return;
++      }
++      MOZ_LAYERS_LOG(("NOT REMOVED buffer id = %d", id));
++     return;
++  }
++  default:
++    NS_RUNTIMEABORT("unexpected SurfaceDescriptor type!");
++    return;
++  }
++  if (aSurface->type() == SurfaceDescriptor::TSurfaceDescriptorNetworked) {
++    DestroyNetworkSurface(aSurface);
++  }
++}
++
+ // Destroy the Shmem SurfaceDescriptor |aSurface|.
+ template<class ShmemDeallocator>
+ static void
+@@ -491,14 +600,22 @@
+   case SurfaceDescriptor::TShmem: {
+     aDeallocator->DeallocShmem(aSurface->get_Shmem());
+     *aSurface = SurfaceDescriptor();
++    MOZ_LAYERS_LOG(("destroying SHM surface"));
++    return;
++  }
++  case SurfaceDescriptor::TSurfaceDescriptorNetworked: {
++    DestroyNetworkSurface(aSurface);
+     return;
+   }
+   default:
+     NS_RUNTIMEABORT("unexpected SurfaceDescriptor type!");
+     return;
+   }
++  MOZ_LAYERS_LOG(("destroyed shadow layer surface"));
+ }
+ 
++
++
+ void
+ ShadowLayerForwarder::DestroySharedSurface(SurfaceDescriptor* aSurface)
+ {
+diff -r b25c3bbf8bd6 gfx/layers/ipc/ShadowLayers.h
+--- a/gfx/layers/ipc/ShadowLayers.h	Mon Jul 16 10:05:22 2012 -0700
++++ b/gfx/layers/ipc/ShadowLayers.h	Mon Jul 16 16:25:48 2012 -0700
+@@ -46,6 +46,9 @@
+ #include "ImageLayers.h"
+ #include "Layers.h"
+ 
++#include <nsTArray.h>
++
++
+ class gfxSharedImageSurface;
+ 
+ namespace mozilla {
+@@ -217,6 +220,15 @@
+                            const nsIntRect& aBufferRect,
+                            const nsIntPoint& aBufferRotation,
+                            const SurfaceDescriptor& aNewFrontBuffer);
++
++  void PaintedThebesBufferNet(ShadowableLayer* aThebes,
++                           const nsIntRegion& aUpdatedRegion,
++                           const nsIntRect& aBufferRect,
++                           const nsIntPoint& aBufferRotation,
++                           const SurfaceDescriptor& aNewFrontBuffer,
++                           unsigned int num, nsTArray<PRUint32> sizes, nsTArray<uint8> data, bool aDidSelfCopy);
++
++
+   /**
+    * NB: this initial implementation only forwards RGBA data for
+    * ImageLayers.  This is slow, and will be optimized.
+@@ -518,10 +530,13 @@
+ 
+   MOZ_LAYER_DECL_NAME("ShadowThebesLayer", TYPE_SHADOW)
+ 
++  gfxASurface *_currentFrontSurface;
++
+ protected:
+   ShadowThebesLayer(LayerManager* aManager, void* aImplData)
+-    : ThebesLayer(aManager, aImplData)
++    : ThebesLayer(aManager, aImplData), _currentFrontSurface(NULL)
+   {}
++
+ };
+ 
+ 
+diff -r b25c3bbf8bd6 gfx/layers/ipc/ShadowLayersParent.cpp
+--- a/gfx/layers/ipc/ShadowLayersParent.cpp	Mon Jul 16 10:05:22 2012 -0700
++++ b/gfx/layers/ipc/ShadowLayersParent.cpp	Mon Jul 16 16:25:48 2012 -0700
+@@ -40,6 +40,7 @@
+ 
+ #include <vector>
+ 
++
+ #include "ShadowLayersParent.h"
+ #include "ShadowLayerParent.h"
+ #include "ShadowLayers.h"
+@@ -51,6 +52,16 @@
+ #include "gfxSharedImageSurface.h"
+ 
+ #include "ImageLayers.h"
++#include "BasicLayers.h"
++#include "gfxUtils.h"
++#include "plbase64.h"
++
++#include "imgITools.h"
++#include "imgIContainer.h"
++#include "imgIDecoderObserver.h"
++#include "imgIContainerObserver.h"
++#include "nsStringStream.h"
++
+ 
+ typedef std::vector<mozilla::layers::EditReply> EditReplyVector;
+ 
+@@ -146,6 +157,15 @@
+     const Edit& edit = cset[i];
+ 
+     switch (edit.type()) {
++    
++    case Edit::TOpDestroySurface: {
++        const OpDestroySurface& op = edit.get_OpDestroySurface();
++        SurfaceDescriptorNetworked sd = op.surface();
++        MOZ_LAYERS_LOG(("need to destroy buffer id = %d", sd.id()));
++    
++	break;
++    }
++    
+       // Create* ops
+     case Edit::TOpCreateThebesLayer: {
+       MOZ_LAYERS_LOG(("[ParentSide] CreateThebesLayer"));
+@@ -364,6 +384,206 @@
+       break;
+     }
+ 
++case Edit::TOpPaintThebesBufferNet: {
++    MOZ_LAYERS_LOG(("[ParentSide] Paint ThebesLayerNet"));
++
++    const OpPaintThebesBufferNet& op = edit.get_OpPaintThebesBufferNet();
++    ShadowLayerParent* shadow = AsShadowLayer(op);
++    ShadowThebesLayer* thebes =
++        static_cast<ShadowThebesLayer*>(shadow->AsLayer());
++    const ThebesBuffer& newFront = op.newFrontBuffer();
++
++    unsigned int images = op.numregions();
++    const nsTArray<unsigned int> sizes = op.sizes();
++    const nsTArray<uint8> data = op.data();
++    static int update = 0;
++
++    MOZ_LAYERS_LOG(("we got serial = %d", update));
++
++    ThebesBuffer newBack;
++    nsIntRegion newValidRegion;
++    ThebesBuffer readonlyFront;
++    nsIntRegion frontUpdatedRegion;
++
++    nsIntPoint rot = newFront.rotation();
++
++    float newXResolution, newYResolution;
++    thebes->Swap(newFront, op.updatedRegion(),
++                   &newBack, &newValidRegion, &newXResolution, &newYResolution);
++
++    if (thebes->_currentFrontSurface) {
++
++    	MOZ_LAYERS_LOG(("[%d] we have a valid surface", update));
++    	nsRefPtr<gfxContext> target_ctx =
++    			new gfxContext(thebes->_currentFrontSurface);
++
++    	nsIntRegionRectIterator *iter =
++    			new nsIntRegionRectIterator(op.updatedRegion());
++
++    	const nsIntRect *cur = NULL;
++    	const unsigned char *dptr = data.Elements();
++    	int i = 0;
++
++    	static nsIntRect prevBufferRect(0,0,0,0);
++
++    	MOZ_LAYERS_LOG(("[%d] contains %d sub-regions", update, images));
++    	MOZ_LAYERS_LOG(("beginning iteration, buffer rect = %d %d %d %d",
++    			newFront.rect().x,
++    			newFront.rect().y,
++    			newFront.rect().width,
++    			newFront.rect().height));
++
++    	nsIntRect rect_real(newFront.rect().x,
++    			newFront.rect().y,
++    			newFront.rect().width,
++    			newFront.rect().height - newFront.rotation().y);
++
++    	nsIntRect rect_rot(0,
++    			newFront.rect().y  + newFront.rect().height -
++    			newFront.rotation().y,
++    			newFront.rect().width,
++    			newFront.rotation().y);
++
++    	MOZ_LAYERS_LOG(("[%d] real region: %d %d %d %d\n", update, rect_real.x,
++    			rect_real.y,
++    			rect_real.width,
++    			rect_real.height));
++
++    	MOZ_LAYERS_LOG(("[%d] rotated region: %d %d %d %d\n", update, rect_rot.x,
++    			rect_rot.y,
++    			rect_rot.width,
++    			rect_rot.height));
++
++    	int hasrotation = (newFront.rotation() != nsIntPoint(0,0));
++    	nsIntPoint movedby = prevBufferRect.TopLeft() - newFront.rect().TopLeft();
++
++    	//        this is MovePixel support of child
++    	//        if (op.didSelfCopy()) {
++    	//            printf("moving surface by %d %d\n", movedby.x, movedby.y);
++    	//            // spooky, and plan wrong
++    	//            thebes->_currentFrontSurface->MovePixels(nsIntRect(0, 0, thebes->_currentFrontSurface->GetSize().width,  thebes->_currentFrontSurface->GetSize().height), movedby);
++    	//        }
++
++
++    	for (cur = iter->Next(); cur; cur=iter->Next()) {
++
++    		unsigned int subimage = 0;
++    		nsCOMPtr<imgITools> imgtool =
++    				do_CreateInstance("@mozilla.org/image/tools;1");
++
++    		nsCOMPtr<nsIInputStream> stream;
++    		nsresult rv = NS_NewByteInputStream(getter_AddRefs(stream),
++    				reinterpret_cast<const char*>(dptr),
++    				sizes[i],
++    				NS_ASSIGNMENT_DEPEND);
++    		NS_ENSURE_SUCCESS(rv, rv);
++
++    		// decode image
++    		nsCOMPtr<imgIContainer> container;
++    		rv = imgtool->DecodeImageData(stream,
++										  NS_LITERAL_CSTRING("image/jpeg"),
++										  getter_AddRefs(container));
++    		NS_ENSURE_SUCCESS(rv, rv);
++
++    		nsRefPtr<gfxImageSurface> region_surf;
++    		rv = container->CopyFrame(imgIContainer::FRAME_CURRENT, true,
++    				getter_AddRefs(region_surf));
++    		NS_ENSURE_SUCCESS(rv, rv);
++
++    		MOZ_LAYERS_LOG(("[%d-%d] region: %d %d %d %d\n", update,
++    				subimage,
++    				cur->x,
++    				cur->y,
++    				cur->width,
++    				cur->height));
++
++    		gfxMatrix m(target_ctx->CurrentMatrix());
++    		int direction = 0;
++
++    		if (movedby.y > 0) {
++    			direction = 1;
++    		} else if (movedby.y < 0) {
++
++    		}
++
++    		nsIntPoint rotationpoint;
++
++    		MOZ_LAYERS_LOG(("[%d] direction = %d, as delta is %d\n", update,
++    				direction,
++    				movedby.y));
++
++    		if(rect_real.Contains(*cur) && rect_rot.Contains(*cur)) {
++    			NS_RUNTIMEABORT("unimplemented: buffer covers rot/reg region");
++    		}
++
++    		if (hasrotation) {
++
++    			if (!direction) {
++    				if(rect_real.Contains(*cur)) {
++    					rotationpoint = -rect_real.TopLeft();
++    					MOZ_LAYERS_LOG(("real rect\n"));
++    				} else if (rect_rot.Contains(*cur)) {
++    					rotationpoint = -rect_rot.TopLeft();
++    					MOZ_LAYERS_LOG(("rot rect\n"));
++    				}
++    			} else {
++
++    				if(rect_real.Contains(*cur)) {
++    					rotationpoint = -rect_rot.TopLeft();
++    					MOZ_LAYERS_LOG(("rot rect\n"));
++    				} else if (rect_rot.Contains(*cur)) {
++    					rotationpoint = -rect_real.TopLeft();
++    					MOZ_LAYERS_LOG(("real rect\n"));
++    				}
++
++    			}
++
++    		} else {
++    			rotationpoint = -newFront.rect().TopLeft();
++    		}
++
++    		gfxPoint _rpoint(rotationpoint.x, rotationpoint.y);
++    		target_ctx->Translate(_rpoint);
++
++    		gfxRect _cur(cur->x, cur->y, cur->width, cur->height);
++    		target_ctx->Clip(_cur);
++    		target_ctx->SetSource(region_surf, gfxPoint(cur->x, cur->y));
++    		target_ctx->SetOperator(gfxContext::OPERATOR_SOURCE);
++    		target_ctx->Paint();
++    		MOZ_LAYERS_LOG(("painting, translation is: %f\n", target_ctx->CurrentMatrix().y0));
++#ifdef MOZ_DUMP_PAINTING
++    		if (PR_GetEnv("MOZ_LAYERS_DUMP_NETWORK_SURFACES")) {
++    			char buff[128];
++    			snprintf(buff,128,"/tmp/recv-surface-%04d-%04d.png", update, i);
++    			thebes->_currentFrontSurface->WriteAsPNG(buff);
++    			snprintf(buff,128,"/tmp/recv-region-%04d-%04d.png", update, i);
++    			region_surf->WriteAsPNG(buff);
++    		}
++#endif
++    		target_ctx->SetMatrix(m);
++    		target_ctx->ResetClip();
++
++    		dptr+=sizes[i];
++    		i++;
++
++    		subimage++;
++    	}
++
++    	// ugly, ugly ugly FIXME
++    	prevBufferRect = newFront.rect();
++    }
++
++
++    update++;
++
++    replyv.push_back(
++    		OpThebesBufferSwap(
++    				shadow, NULL,
++    				newBack, newValidRegion, newXResolution, newYResolution));
++
++
++    break;
++}
+     case Edit::TOpPaintThebesBuffer: {
+       MOZ_LAYERS_LOG(("[ParentSide] Paint ThebesLayer"));
+ 
+diff -r b25c3bbf8bd6 gfx/thebes/gfxPlatformGtk.h
+--- a/gfx/thebes/gfxPlatformGtk.h	Mon Jul 16 10:05:22 2012 -0700
++++ b/gfx/thebes/gfxPlatformGtk.h	Mon Jul 16 16:25:48 2012 -0700
+@@ -134,7 +134,7 @@
+         // GL-accelerated compositing.
+         return PR_TRUE;
+ #else
+-        return PR_FALSE;
++        return PR_TRUE;
+ #endif
+     }
+ 
